@@ -1,0 +1,761 @@
+---
+title: "A practical introduction to SCR in R"
+author: "Ian Durbach & Koustubh Sharma"
+institute: University of St Andrews & Snow Leopard Trust
+#date: "`r format(Sys.time(), '%d %B, %Y')`"
+date: "11 July 2023"
+format: 
+  revealjs:
+      chalkboard: true
+      smaller: false
+      scrollable: true
+      theme: default
+      logo: all3logs.png
+      footer: "SLN Summer Exchange"
+      slide-number: true
+      show-slide-number: print
+      echo: true
+      
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(raster)
+library(secr)
+library(sf)
+library(sp)
+library(ggplot2)
+library(secrdesign)
+my_crs <- "+proj=utm +zone=43 +datum=WGS84 +units=m +no_defs"
+load("output/all-designs.Rdata")
+load("output/slmods.Rdata")
+```
+
+# Introduction to SCR
+
+## Spatial capture-recapture (SCR)
+
+![](images/footer-img.jpg){width=600}
+
+- Commonly used to estimate animal abundance 
+- Use detectors at fixed locations to record the presence of marked animals
+
+Combines models for *spatial distribution of animal activity centers* and the *detection process*
+
+## Population model
+
+![](images/densityexample.png){height=600}
+
+## Detection model
+
+![](images/detmodel.png){height=400}
+
+## Detection model
+
+![](images/detmodel.png){height=400}
+
+- Choose a function and estimate parameters
+- Often, $g(d)=g_0\exp(-d^2/(2\sigma^2))$
+
+## Data needed for SCR
+
+- Detector data
+- Capture history data
+- Mask data
+
+## R package `secr`
+
+- Maximum likelihood framework for fitting SCR models
+
+Model building: 
+
+```{r}
+#| eval: false
+slmod.0 <- secr.fit(capthist = capthist, 
+                    mask = mask, 
+                    model = list(D~1, g0~1, sigma~1), 
+                    detectfn = "HN")
+```
+
+Sample output: 
+
+```{r, echo = FALSE}
+#| output-location: fragment
+predict(slmod.0) 
+```
+
+## Outline
+
+- Designing SCR surveys with `secrdesign`
+- Analyzing SCR surveys using `secr`
+
+
+# Designing SCR surveys with `secrdesign`
+
+## Outline
+
+- Define the survey region
+- Choosing camera locations
+- Comparing candidate designs
+
+## Define the survey region
+
+![](images/survey_region.png){height=600}
+
+## Define the survey goals
+
+- Many possible!
+- We'll assume "to estimate abundance or density *precisely* and *without bias*"
+
+## Define the survey goals
+
+Without bias? 
+
+- "We estimated snow leopard density to be 1.1 / 100km2"
+
+## Define the survey goals
+
+Without bias? 
+
+- "We estimated snow leopard density to be 1.1 / 100km2"
+- Avoid sampling “good” or “bad” habitats preferentially
+
+## Define the survey goals
+
+Precisely?
+
+- "We estimated snow leopard density to be 0.9 – 1.4 / 100km2” (95% CI)"
+
+## Define the survey goals
+
+Precisely?
+
+- "We estimated snow leopard density to be 0.9 – 1.4 / 100km2” (95% CI)"
+- Get a “big” sample size
+
+# Choosing camera locations
+
+## Regular grid design
+
+![](images/grid_survey.png){height=600}
+
+## Regular grid designs
+
+```{r, eval = FALSE}
+#| code-line-numbers: "1|2|3|4|5"
+random_origin <- st_coordinates(sf::st_sample(survey_area, size = 1))
+grid <- make.grid(nx = 7, ny = 7, 
+                  spacing = 3000, 
+                  detector = "count",
+                  originxy = random_origin)
+```
+
+## Algorithmic designs
+
+-  Make a grid of possible camera locations 2km apart
+
+```{r}
+survey_area <- st_read("data/survey_region/survey_region.shp", quiet = TRUE)
+survey_area <- survey_area %>% st_zm() %>% st_transform(my_crs) %>% st_geometry()
+cams_bb <- st_make_grid(survey_area, what = "corners", 
+                        cellsize = c(2000,2000))
+cams <- cams_bb[survey_area]
+```
+
+```{r, echo = FALSE}
+par(mfrow=c(1,3))
+plot(st_geometry(survey_area), main = "survey_area")
+plot(st_geometry(survey_area), main = "cams_bb")
+plot(cams_bb, add= TRUE)
+plot(st_geometry(survey_area), main = "cams")
+plot(cams_bb, add= TRUE)
+plot(cams, add= TRUE, col = "red")
+```
+
+## Algorithmic designs
+
+- Only keep points 2000-4500m elevation
+
+```{r}
+#| code-line-numbers: "1-3|4"
+cams_any <- elevatr::get_elev_point(cams, 
+                                    prj = st_crs(survey_area)$proj4string, 
+                                    src = "aws", overwrite = TRUE) 
+cams_hab <- cams_any %>% dplyr::filter(elevation > 2000, elevation < 4500) %>% st_geometry()
+```
+
+```{r, echo = FALSE}
+par(mfrow=c(1,2))
+plot(st_geometry(survey_area), main = "All points")
+plot(st_geometry(cams_any), add= TRUE)
+plot(st_geometry(survey_area), main = "Elev 2000-4500m")
+plot(st_geometry(cams_any), add= TRUE)
+plot(cams_hab, add= TRUE, col = "red")
+```
+
+## Algorithmic designs
+
+- A "mask" is needed for numerical calculations 
+
+```{r}
+#| code-line-numbers: "1|2|3"
+mesh_poly <- st_union(st_buffer(cams_hab, dist = 20000))
+mesh <- st_make_grid(mesh_poly, what = "corners", cellsize = c(1500, 1500))
+mesh <- mesh[mesh_poly]
+```
+
+```{r, echo = FALSE}
+par(mfrow=c(1,3))
+plot(mesh_poly, col="white", main = "mesh_poly")
+plot(st_geometry(survey_area), add = TRUE)
+plot(mesh_poly, main = "mesh points")
+plot(mesh, add = TRUE)
+plot(st_geometry(survey_area), add = TRUE, fill = NA)
+plot(mesh_poly, main = "mesh + cams")
+plot(mesh, add = TRUE)
+plot(st_geometry(survey_area), add = TRUE, fill = NA)
+plot(cams_hab, add= TRUE, col = "red")
+```
+
+## Algorithmic designs
+
+- Turn into `secr` objects
+
+## Algorithmic designs
+
+- Turn into `secr` objects
+
+- Potential camera locations is a "traps" object
+
+```{r}
+alltraps_df <- data.frame(x = st_coordinates(cams)[,1], 
+                          y = st_coordinates(cams)[,2]) 
+alltraps <- read.traps(data = alltraps_df, detector = "count")
+```
+
+## Algorithmic designs
+
+- Turn into `secr` objects
+
+- Potential camera locations is a "traps" object
+
+```{r}
+alltraps_df <- data.frame(x = st_coordinates(cams)[,1], 
+                          y = st_coordinates(cams)[,2]) 
+alltraps <- read.traps(data = alltraps_df, detector = "count")
+```
+
+- Make a "mask" object
+
+```{r}
+mesh_df <- data.frame(x = st_coordinates(mesh)[,1], 
+                      y = st_coordinates(mesh)[,2]) 
+mesh <- read.mask(data = mesh_df)
+```
+
+## Algorithmic designs
+
+- Design maximizing the smaller of (individuals seen, recaptures)
+
+```{r, eval=FALSE}
+#| code-line-numbers: "1-2|3|4-5|6|7|8-9"
+mnr <- GAoptim(mask = mesh, 
+               alltraps = alltraps, 
+               ntraps = 50, 
+               detectpar = list(lambda0 = 0.25, sigma = 8000), 
+               D = 0.0001, 
+               criterion = 4, 
+               seed = 1234, 
+               noccasions = 1, detectfn = c("HHN"), 
+               ngen = 100, verbose = FALSE)
+```
+
+## Algorithmic designs 
+
+![](images/mnr_survey.png){height=600}
+
+## Algorithmic designs
+
+- Design maximizing the probability of seen an animal twice
+
+```{r, eval = FALSE}
+#| code-line-numbers: "6"
+p2 <- GAoptim(mask = mesh, 
+              alltraps = alltraps, 
+              ntraps = 50, 
+              detectpar = list(lambda0 = 0.25, sigma = 8000), 
+              D = 0.0001, 
+              criterion = 6, 
+              seed = 1234, 
+              noccasions = 1, detectfn = c("HHN"), 
+              ngen = 100, verbose = TRUE)
+```
+
+## Algorithmic designs 
+
+![](images/p2_survey.png){height=600}
+
+## Lacework designs
+
+![](images/lw_survey.png){height=600}
+
+## Lacework designs
+
+```{r, echo=FALSE}
+survey_area_sp <- as(survey_area[[1]], 'Spatial')
+survey_area_sp <- as(survey_area_sp, 'SpatialPolygonsDataFrame')
+```
+
+```{r, eval=FALSE}
+#| code-line-numbers: "1|2|3|4"
+lw_traps <- make.lacework(region = survey_area_sp, 
+                          spacing = c(12500, 2500),  
+                          rotate = 45, 
+                          detector = "count")
+```
+
+# Comparing candidate designs
+
+## How to choose
+
+- Expected numbers of detections 
+
+```{r}
+Enrm(traps = mnr$optimaltraps, mask = mesh, 
+     detectpar = list(lambda0 = 0.25, sigma = 8000), D = 1/10000, 
+     noccasions = 1, detectfn = "HHN")
+```
+
+## How to choose
+
+- Expected CV
+
+```{r}
+minnrRSE(traps = mnr$optimaltraps, mask = mesh, 
+         detectpar = list(lambda0 = 0.25, sigma = 8000), D = 1/10000, 
+         noccasions = 1, detectfn = "HHN")
+```
+
+## How to choose
+
+```{r, echo=FALSE}
+enrm <- rbind(
+  Enrm(traps = grid, mask = mesh, detectpar = list(lambda0 = 0.25, sigma = 8000), D = 1/10000, noccasions = 1, detectfn = "HHN"),
+  Enrm(traps = mnr$optimaltraps, mask = mesh, detectpar = list(lambda0 = 0.25, sigma = 8000), D = 1/10000, noccasions = 1, detectfn = "HHN"),
+  Enrm(traps = p2$optimaltraps, mask = mesh, detectpar = list(lambda0 = 0.25, sigma = 8000), D = 1/10000, noccasions = 1, detectfn = "HHN"),
+  Enrm(traps = lw_traps, mask = mesh, detectpar = list(lambda0 = 0.25, sigma = 8000), D = 1/10000, noccasions = 1, detectfn = "HHN"))
+
+cv <- c(
+  minnrRSE(traps = grid, mask = mesh, detectpar = list(lambda0 = 0.25, sigma = 8000), D = 1/10000,
+           noccasions = 1, detectfn = "HHN"),
+  minnrRSE(traps = mnr$optimaltraps, mask = mesh, detectpar = list(lambda0 = 0.25, sigma = 8000), D = 1/10000, noccasions = 1, detectfn = "HHN"),
+  minnrRSE(traps = p2$optimaltraps, mask = mesh, detectpar = list(lambda0 = 0.25, sigma = 8000), D = 1/10000, noccasions = 1, detectfn = "HHN"),
+  minnrRSE(traps = lw_traps, mask = mesh, detectpar = list(lambda0 = 0.25, sigma = 8000), D = 1/10000, noccasions = 1, detectfn = "HHN"))
+data.frame(mod = c("Grid", "Min(n,r)", "P2", "Lacework"), round(enrm,1), CV = round(100*cv, 1))  
+```
+
+## How to choose
+
+A rough checklist:
+
+- Cameras cover >1 home range?
+- Sufficient unique animals (>10)?
+- Sufficient recaptures (>10)?
+- Recaptures at various distances?
+- Danger of bias?
+
+More details at https://www.scr-cameratrap.com/
+
+# Analyzing SCR surveys using `secr`
+
+## Outline
+
+- Detector data
+- Capture histories
+- Integration mask (mesh/state space)
+- Model fitting
+
+# Preparing detector data for `secr`
+
+## Detector data 
+
+![](images/ex_trapfile.png)
+
+## Detector data
+
+- read in csv/xlsx file
+
+```{r}
+traps_df <- read.csv("data/secr_inputs/ex_trapfile_ll.csv") 
+traps_df <- as.data.frame(traps_df)
+```
+
+## Detector data
+
+- read in csv/xlsx file
+
+```{r}
+traps_df <- read.csv("data/secr_inputs/ex_trapfile_ll.csv") 
+traps_df <- as.data.frame(traps_df)
+```
+
+- convert lat long to UTM
+
+```{r}
+traps_sf <- st_as_sf(traps_df, coords = c("x", "y")) %>% 
+  st_set_crs(4326) %>% 
+  st_transform("+proj=utm +zone=43 +datum=WGS84 +units=m +no_defs") 
+
+traps_df$x <- st_coordinates(traps_sf)[,1]
+traps_df$y = st_coordinates(traps_sf)[,2]
+```
+
+## Detector data
+
+- read in csv/xlsx file
+
+```{r}
+traps_df <- read.csv("data/secr_inputs/ex_trapfile_ll.csv") 
+traps_df <- as.data.frame(traps_df)
+```
+
+- convert lat long to UTM
+
+```{r}
+traps_sf <- st_as_sf(traps_df, coords = c("x", "y")) %>% 
+  st_set_crs(4326) %>% 
+  st_transform("+proj=utm +zone=43 +datum=WGS84 +units=m +no_defs") 
+
+traps_df$x <- st_coordinates(traps_sf)[,1]
+traps_df$y = st_coordinates(traps_sf)[,2]
+```
+
+- keep only trap ID, x, y, and effort (we'll covariates later)
+
+```{r}
+traps_df_nocovs <- traps_df[,1:4]
+```
+
+## Detector data
+
+- create a "traps" object for `secr`
+
+```{r}
+#| code-line-numbers: "1|2|3|4"
+#| output-location: fragment
+traps <- read.traps(data = traps_df_nocovs, 
+                    detector = "count", 
+                    binary.usage = FALSE, 
+                    trapID = "Detector")
+summary(traps)
+```
+
+## Detector data
+
+- double check usage is correct
+
+```{r}
+#| output-location: fragment
+attr(traps, "usage") 
+```
+
+## Detector data
+
+- add covariates
+
+```{r}
+covariates(traps)$topography <- traps_df$topography
+covariates(traps)$cameratype <- traps_df$cameratype
+```
+
+# Preparing capture history data for `secr`
+
+## Capture histories 
+
+![](images/ex_captfile.png)
+
+## Capture histories
+
+- Read in file
+
+```{r}
+ch_df <- read.csv("data/secr_inputs/ex_capthist.csv")
+ch_df <- as.data.frame(ch_df)
+```
+
+## Capture histories
+
+- Read in file
+
+```{r}
+ch_df <- read.csv("data/secr_inputs/ex_capthist.csv")
+ch_df <- as.data.frame(ch_df)
+```
+
+- make `capthist` object
+
+```{r}
+#| output-location: fragment
+capthist <- make.capthist(captures = ch_df, traps = traps) 
+summary(capthist, terse = TRUE)
+```
+
+# Make an integration mask 
+
+## From a `traps` object
+
+```{r}
+#| eval: false
+#| code-line-numbers: "1|2|3|4"
+mesh <- make.mask(traps = traps, 
+                  buffer = 20000,
+                  spacing = 1500,
+                  type = "trapbuffer")
+```
+
+## Plot the mask 
+
+```{r}
+plot(mesh)
+plot(traps, add = TRUE)
+plot(survey_area, add = TRUE)
+```
+
+## How to choose buffer and spacing
+
+- guesstimate of sigma
+
+```{r}
+qnd <- autoini(capthist = capthist, 
+               mask = make.mask(traps = traps, 
+                                buffer = 10000, spacing = 1500))
+```
+
+## How to choose buffer and spacing
+
+- quick and dirty estimate of sigma
+
+```{r}
+qnd <- autoini(capthist = capthist, 
+               mask = make.mask(traps = traps, 
+                                buffer = 10000, spacing = 1500))
+```
+
+- Reasonable buffer is 4 * sigma
+
+```{r}
+qnd$sigma * 4
+```
+
+## How to choose buffer and spacing
+
+- quick and dirty estimate of sigma
+
+```{r}
+qnd <- autoini(capthist = capthist, 
+               mask = make.mask(traps = traps, 
+                                buffer = 10000, spacing = 1500))
+```
+
+- Reasonable buffer is 4 * sigma
+
+```{r}
+qnd$sigma * 4
+```
+
+- Reasonable spacing is 0.6 * sigma
+
+```{r}
+qnd$sigma * 0.6
+```
+
+## How to choose buffer and spacing
+
+- `suggest.buffer` can also suggest a reasonable buffer
+
+```{r}
+suggest.buffer(object = capthist, detectfn = "HN")
+```
+
+## Adding spatial covariates to the mask
+
+- From raster files
+
+```{r}
+#| eval: false
+tri <- raster("data/spatial_covs/TRI.tiff")
+tri_crs <- projectRaster(tri, crs = my_crs)
+```
+
+## Adding spatial covariates to the mask
+
+- From raster files
+
+```{r}
+#| eval: false
+tri <- raster("data/spatial_covs/TRI.tiff")
+tri_crs <- projectRaster(tri, crs = my_crs)
+```
+
+- Add to mask
+
+```{r}
+#| eval: false
+mesh <- addCovariates(mesh, tri_crs)
+```
+
+## Adding spatial covariates to the mask
+
+- From raster files
+
+```{r}
+#| eval: false
+tri <- raster("data/spatial_covs/TRI.tiff")
+tri_crs <- projectRaster(tri, crs = my_crs)
+```
+
+- Add to mask
+
+```{r, echo = FALSE}
+load("output/mesh_with_covs.Rdata")
+```
+
+```{r}
+#| eval: false
+mesh <- addCovariates(mesh, tri_crs)
+```
+
+- Or directly from a shape file 
+
+```{r}
+#| eval: false
+mesh <- addCovariates(mesh, "data/spatial_covs/TRI.shp")
+```
+
+## Plot mask covariate
+
+```{r}
+plot(mesh, covariate = "TRI", legend = FALSE)
+```
+
+## Final check
+
+```{r}
+plot(mesh, covariate = "TRI", legend = FALSE) 
+plot(traps, add = TRUE) 
+plot(capthist, tracks = TRUE, add = TRUE) 
+```
+
+# Model fitting
+
+## Baseline model
+
+```{r}
+#| eval: false
+#| code-line-numbers: "1|2|3|4"
+slmod.0 <- secr.fit(capthist = capthist, 
+                  mask = mesh, 
+                  model = list(D~1, g0~1, sigma~1), 
+                  detectfn = "HN")
+```
+
+## Examine model output
+
+- estimates on link scale
+```{r}
+#| output-location: fragment
+coef(slmod.0) 
+```
+
+## Examine model output
+
+- estimates on link scale
+```{r}
+coef(slmod.0) 
+```
+
+- estimates on natural scale
+```{r}
+#| output-location: fragment
+predict(slmod.0) 
+```
+
+## Examine model output
+
+- abundance estimates
+```{r}
+#| output-location: fragment
+region.N(slmod.0) 
+```
+
+
+## Model with spatially-varying density 
+
+```{r}
+#| eval: false
+#| #| code-line-numbers: "3"
+slmod.tri <- secr.fit(capthist = capthist, 
+                    mask = mesh, 
+                    model = list(D~TRI, g0~1, sigma~1), 
+                    detectfn = "HN")
+```
+
+## Examine model output
+
+- estimates on link scale
+
+```{r}
+#| output-location: fragment
+coef(slmod.tri) 
+```
+
+## Examine model output
+
+- estimates on link scale
+
+```{r}
+coef(slmod.tri) 
+```
+
+- Use AIC for model selection
+
+```{r}
+#| output-location: fragment
+AIC(slmod.0, slmod.tri)
+```
+
+## Abundance in the survey region
+
+- Make a new mask that covers the survey region
+
+```{r}
+#| code-line-numbers: "2|5"
+fullmask <- make.mask(traps = traps, 
+                  buffer = 50000,
+                  spacing = 1500,
+                  type = "trapbuffer",
+                  poly = survey_area)
+```
+
+## Abundance in the survey region
+
+```{r}
+plot(fullmask)
+plot(traps, add = TRUE)
+plot(survey_area, add = TRUE)
+```
+
+## Abundance in the survey region
+
+```{r}
+region.N(slmod.0, region = fullmask) 
+```
+
+## Further resources
+
+- https://globalsnowleopard.org/gslep-projects/paws/the-paws-process/
+- https://globalsnowleopard.org/gslep-projects/paws/paws-resources/trainings/
+- https://www.scr-cameratrap.com/
+- https://www.otago.ac.nz/density/
+- Durbach, I., Borchers, D., Sutherland, C., & Sharma, K. (2021). Fast, flexible alternatives to regular grid designs for spatial capture–recapture. Methods in Ecology and Evolution, 12(2), 298-310.
+
